@@ -14,6 +14,8 @@ extern "C" {
 }
 #endif
 
+#define CURVE_BUF_SIZE 200
+
 struct LL {
     char degree;
     char minute;
@@ -48,10 +50,11 @@ private:
     bit ** mBits;
     int mWidth;
     int mHeight;
+    int * mVerticalLines;
 
 public:
     Graph() : mMax(0), mMin(0), mThreshold(0), mSize(0), mScaleX(1), mScaleY(1), mData(NULL),
-        mBits(NULL), mWidth(0), mHeight(0) {
+        mBits(NULL), mWidth(0), mHeight(0), mVerticalLines(NULL) {
     }
 
 private:
@@ -82,6 +85,10 @@ public:
 
     void setThreshold(T threshold) {
         mThreshold = threshold;
+    }
+
+    void setVerticalLines(int * lines) {
+        mVerticalLines = lines;
     }
 
     void setData(T* data, int size) {
@@ -179,6 +186,29 @@ private:
         return;
     }
 
+    void drawMarkedLines() {
+        int center = mMax * mScaleY;
+        drawLine(0, center, mWidth, center);
+        if (mThreshold != 0) {
+            int t =  mThreshold * mScaleY;
+            drawLine(0, center + t, mWidth, center + t);
+            drawLine(0, center - t, mWidth, center - t);
+        }
+        if (mVerticalLines != NULL) {
+            for (int i = 0; i < CURVE_BUF_SIZE; i++) {
+                if (mVerticalLines[i] <= 0)
+                    return;
+                int x = 0;
+                if (mScaleX > 0)
+                    x = static_cast<int>((mVerticalLines[i] + 0.5f) * mScaleX);
+                if (mScaleX == 0)
+                    x = mVerticalLines[i];
+                
+                drawLine(x, 0, x, mHeight - 1);
+            }
+        }
+    }
+
     void dataToPBM() {
         int center = mMax * mScaleY;
         if (mData == NULL)
@@ -187,12 +217,7 @@ private:
             printf("Not support the mScaleX < 1 now\n");
         } if (mScaleX == 1) {
             //printf("mScaleX = 1\n");
-            drawLine(0, center, mWidth, center);
-            if (mThreshold != 0) {
-                int t =  mThreshold * mScaleY;
-                drawLine(0, center + t, mWidth, center + t);
-                drawLine(0, center - t, mWidth, center - t);
-            }
+            drawMarkedLines();
             for (int i = 0; i < mSize; i++) {
                 int x = i;
                 int y = (mMax - mData[i]) * mScaleY;
@@ -201,12 +226,7 @@ private:
         } else {
             // mScaleX > 1
             //printf("mScaleX > 1\n");
-            drawLine(0, center, mWidth, center);
-            if (mThreshold != 0) {
-                int t =  mThreshold * mScaleY;
-                drawLine(0, center + t, mWidth, center + t);
-                drawLine(0, center - t, mWidth, center - t);
-            }
+            drawMarkedLines();
             int lastX = 0, lastY = center;
             for (int i = 0; i < mSize; i++) {
                 // draw in center of the gap (mScale)
@@ -504,6 +524,7 @@ public:
 class FindCurve {
 private:
     double * mData;
+    int * mCurveLocation;
     ssize_t mSize;
     double mThreshold;
     double mThreshold2;
@@ -534,17 +555,22 @@ public:
             mSize = size;
             mData = new double [mSize];
             int sign = data[0] > 0 ? 1 : -1;
+            mTotal = 0;
             for (int i = 0; i < size; i++) {
                 double angle = data[i] * sign;
                 mTotal += angle;
                 mData[i] = angle;
             }
-            double peak = mTotal / 2;
-            double sum;
+            if (mTotal < 20)
+                return false;
+            double peak = mTotal / 2.0;
+            double sum = 0;
             for (int i = 0; i < size; i++) {
                 sum += mData[i];
-                if (sum >= peak)
-                    mPeak = i - 1;
+                if (sum >= peak) {
+                    mPeak = i;
+                    break;
+                }
             }
             return true;
         }
@@ -553,11 +579,13 @@ public:
             if (mData == NULL)
                 return;
             char name[30];
-            snprintf(name, 30, "/tmp/pbm/curve_%4u.pbm", s);
+            snprintf(name, 30, "/tmp/pbm/curve_%04u.pbm", s);
             Graph<double> g;
             g.setData(mData, mSize);
-            g.write(name, 50, 300);
-            printf("Size %lu, Peak at %d\n", mSize, mPeak);
+            int vlines[2] = {(int)mPeak, 0};
+            g.setVerticalLines(vlines);
+            g.write(name, 100, 300);
+            printf("Size %lu, Total %6f Peak at %d\n", mSize, mTotal, mPeak);
         }
 
         double operator[](int i) {
@@ -567,10 +595,16 @@ public:
         }
     };
 
-    FindCurve(double * data, ssize_t size) : mData(data), mSize(size), mThreshold(2), mThreshold2(1) {
+    FindCurve(double * data, ssize_t size) :
+        mData(data), mCurveLocation(NULL), mSize(size), mThreshold(2), mThreshold2(1) {
+        mCurveLocation = new int [CURVE_BUF_SIZE];
+        for (int i = 0; i < CURVE_BUF_SIZE; i++) {
+            mCurveLocation[i] = 0;
+        }
     }
     
     ~FindCurve() {
+        delete mCurveLocation;
     }
 
     void setThreshold(double threshold) {
@@ -588,6 +622,7 @@ public:
         double * bufPtr = buffer;
         int index = 0;
         int serial = 0;
+        int curveLocationIdx = 0;
         
         for (int i = 0; i < mSize; i++) {
             double angle = mData[i];
@@ -597,26 +632,40 @@ public:
                     sign = angle > 0;
                 }
             }
-            if (abs(angle) < mThreshold2 || (angle > 0) != sign) {
-                start = false;
-                Curve c;
-                bool ret = c.setData(buffer, index);
-                if (ret)
-                    c.writeSerial(serial++);
+            if (start) {
+                if (abs(angle) < mThreshold2 || (angle > 0) != sign) {
+                    start = false;
+                    Curve c;
+                    bool ret = c.setData(buffer, index);
+                    if (ret) {
+                        printf("\nCurve %d\n", serial);
+                        c.writeSerial(serial);
+                        mCurveLocation[serial] = i - (index - c.mPeak);
+                        serial++;
+                    }
 
-                bufPtr = buffer;
-                index = 0;
-            } else {
-                *bufPtr++ = angle;
-                index++;
-                if (index >= N) {
-                    printf("Run out of buffer\n");
-                    return;
+                    bufPtr = buffer;
+                    index = 0;
+                } else {
+                    *bufPtr++ = angle;
+                    index++;
+                    if (index >= N) {
+                        printf("Run out of buffer\n");
+                        return;
+                    }
                 }
             }
         }
 
         delete [] buffer;
+    }
+
+    void markCurve() {
+        Graph<double> g;
+        g.setData(mData, mSize);
+        g.setThreshold(mThreshold);
+        g.setVerticalLines(mCurveLocation);
+        g.write("/tmp/pbm/FindCurve.pbm", mSize, 300);
     }
 };
 
@@ -672,9 +721,6 @@ int main(int argc, char ** argv) {
         ptr2++;
     }
 
-    time(&t1);
-    seconds = difftime(t1, t0);
-
     double * angles = new double [lines - 2];
     double accx = 0., accy = 0., accl = 0.;
     for (int i = 0; i < lines - 2; i++) {
@@ -715,12 +761,16 @@ int main(int argc, char ** argv) {
 //    w.setData(angles, 0, 6);
 
     Gaussian g(angles, lines - 2);
-    g.filter(16);
+    g.filter(8);
 
     FindCurve f(g.mResult, g.mSize);
     f.findCurve();
+    f.markCurve();
 
     printf("Total %fm\n", accl);
+
+    time(&t1);
+    seconds = difftime(t1, t0);
     printf ("%.f seconds for processing %d data.\n", seconds, lines);
     fclose(fp);
 
