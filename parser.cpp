@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <vector>
 
 #ifdef __cplusplus  
 extern "C" {  
@@ -39,6 +40,7 @@ class Graph {
 private:
     T mMax;
     T mMin;
+    T mThreshold;
     int mSize;
     float mScaleY;
     float mScaleX;
@@ -48,7 +50,7 @@ private:
     int mHeight;
 
 public:
-    Graph() : mMax(0), mMin(0), mSize(0), mScaleX(1), mScaleY(1), mData(NULL),
+    Graph() : mMax(0), mMin(0), mThreshold(0), mSize(0), mScaleX(1), mScaleY(1), mData(NULL),
         mBits(NULL), mWidth(0), mHeight(0) {
     }
 
@@ -74,6 +76,14 @@ private:
     }
 
 public:
+    void setMax(int max) {
+        mMax = max;
+    }
+
+    void setThreshold(T threshold) {
+        mThreshold = threshold;
+    }
+
     void setData(T* data, int size) {
         mMax = 0;
         mMin = 0;
@@ -127,16 +137,22 @@ private:
 
         // Virtical
         if (dx == 0) {
+            int x = x0;
+            int y = y0;
+            validate(x, y);
             for (int j = startY; j <= endY; j++) {
-                mBits[j][x0] = 1;
+                mBits[j][x] = 1;
             }
             return;
         }
 
         // Horizontal
         if (dy == 0) {
+            int x = x0;
+            int y = y0;
+            validate(x, y);
             for (int i = startX; i <= endX; i++) {
-                mBits[y0][i] = 1;
+                mBits[y][i] = 1;
             }
             return;
         }
@@ -172,6 +188,11 @@ private:
         } if (mScaleX == 1) {
             //printf("mScaleX = 1\n");
             drawLine(0, center, mWidth, center);
+            if (mThreshold != 0) {
+                int t =  mThreshold * mScaleY;
+                drawLine(0, center + t, mWidth, center + t);
+                drawLine(0, center - t, mWidth, center - t);
+            }
             for (int i = 0; i < mSize; i++) {
                 int x = i;
                 int y = (mMax - mData[i]) * mScaleY;
@@ -181,6 +202,11 @@ private:
             // mScaleX > 1
             //printf("mScaleX > 1\n");
             drawLine(0, center, mWidth, center);
+            if (mThreshold != 0) {
+                int t =  mThreshold * mScaleY;
+                drawLine(0, center + t, mWidth, center + t);
+                drawLine(0, center - t, mWidth, center - t);
+            }
             int lastX = 0, lastY = center;
             for (int i = 0; i < mSize; i++) {
                 // draw in center of the gap (mScale)
@@ -210,6 +236,7 @@ public:
             return;
         dataToPBM();
         pbm_writepbm(file, bits, w, h, true);
+        printf("Graph File:%s Max: %f Min: %f\n", name, (float)mMax, (float)mMin);
 
         pm_close(file);
         pbm_freearray(mBits, h);
@@ -217,6 +244,60 @@ public:
     }
 };
 
+
+class Gaussian {
+public:
+    const double * mData;
+    double * mResult;
+    int mFilterSize;
+    const int mSize;
+    Gaussian(double * data, size_t s) : mData(data), mResult(NULL), mSize(s) {
+    }
+
+    ~Gaussian() {
+        if (mResult == NULL)
+            delete [] mResult;
+    }
+
+    void filter(size_t filterSize) {
+        if (mResult == NULL)
+            mResult = new double [mSize];
+        mFilterSize = filterSize;
+        int half = filterSize / 2;
+        for (int i = 0; i < half; i++) {
+            mResult[i] = mData[i];
+        }
+        for (int i = mSize - half; i < mSize; i++) {
+            mResult[i] = mData[i];
+        }
+        for (int i = half; i < mSize - half; i++) {
+            double sum = 0;
+            for (int f = -half; f < (int)filterSize - half; f++) {
+                sum += mData[f + i];
+            }
+            double avg = sum / (int)filterSize;
+            mResult[i] = avg;
+        }
+    }
+
+    void writeNameByFilter() {
+        if (mResult == NULL)
+            return;
+        char name[30];
+        sprintf(name, "/tmp/pbm/gau_%d.pbm", mFilterSize);
+        Graph<double> g;
+        g.setData(mResult, mSize);
+        g.write(name, 1200, 300);
+    }
+
+    void write(const char * name) {
+        if (mResult == NULL)
+            return;
+        Graph<double> g;
+        g.setData(mResult, mSize);
+        g.write(name, 1200, 300);
+    }
+};
 
 class Wavelet {
 public:
@@ -409,11 +490,135 @@ public:
         return crossProduct(a, b) / a.mNorm / b.mNorm;
     }
 
+    inline static float distance(const Vector& a, const Vector& b) {
+        float dx = a.mX - b.mX;
+        float dy = a.mY - b.mY;
+        return sqrt(dx * dx + dy * dy);
+    }
+
     void toString() {
         printf("%f,%f,%f", mX, mY, mNorm);
     }
 };
 
+class FindCurve {
+private:
+    double * mData;
+    ssize_t mSize;
+    double mThreshold;
+    double mThreshold2;
+
+public:
+    class Curve {
+    public:
+        double * mData;
+        size_t mSize;
+        double mTotal;
+        unsigned int mPeak;
+        Curve() : mData(NULL), mSize(0), mTotal(0), mPeak(0) {
+        }
+
+        Curve(Curve & o) : mData(o.mData), mSize(o.mSize) {
+            o.mData = NULL;
+            o.mSize = 0;
+        }
+
+        ~Curve() {
+            if (mData != NULL)
+                delete [] mData;
+        }
+
+        bool setData(const double * data, size_t size) {
+            if (size < 4)
+                return false;
+            mSize = size;
+            mData = new double [mSize];
+            int sign = data[0] > 0 ? 1 : -1;
+            for (int i = 0; i < size; i++) {
+                double angle = data[i] * sign;
+                mTotal += angle;
+                mData[i] = angle;
+            }
+            double peak = mTotal / 2;
+            double sum;
+            for (int i = 0; i < size; i++) {
+                sum += mData[i];
+                if (sum >= peak)
+                    mPeak = i - 1;
+            }
+            return true;
+        }
+
+        void writeSerial(unsigned int s) {
+            if (mData == NULL)
+                return;
+            char name[30];
+            snprintf(name, 30, "/tmp/pbm/curve_%4u.pbm", s);
+            Graph<double> g;
+            g.setData(mData, mSize);
+            g.write(name, 50, 300);
+            printf("Size %lu, Peak at %d\n", mSize, mPeak);
+        }
+
+        double operator[](int i) {
+            if (mData == NULL)
+                return 0;
+            return mData[i];
+        }
+    };
+
+    FindCurve(double * data, ssize_t size) : mData(data), mSize(size), mThreshold(2), mThreshold2(1) {
+    }
+    
+    ~FindCurve() {
+    }
+
+    void setThreshold(double threshold) {
+        if (threshold == 0)
+            threshold = 2;
+        mThreshold = threshold;
+        mThreshold2 = mThreshold / 2;
+    }
+
+    void findCurve() {
+        bool start = false;
+        bool sign = true;
+        const unsigned int N = static_cast<unsigned int>(360 / mThreshold2);
+        double * buffer = new double [N];
+        double * bufPtr = buffer;
+        int index = 0;
+        int serial = 0;
+        
+        for (int i = 0; i < mSize; i++) {
+            double angle = mData[i];
+            if (!start) {
+                if (abs(angle) > mThreshold) {
+                    start = true;
+                    sign = angle > 0;
+                }
+            }
+            if (abs(angle) < mThreshold2 || (angle > 0) != sign) {
+                start = false;
+                Curve c;
+                bool ret = c.setData(buffer, index);
+                if (ret)
+                    c.writeSerial(serial++);
+
+                bufPtr = buffer;
+                index = 0;
+            } else {
+                *bufPtr++ = angle;
+                index++;
+                if (index >= N) {
+                    printf("Run out of buffer\n");
+                    return;
+                }
+            }
+        }
+
+        delete [] buffer;
+    }
+};
 
 int main(int argc, char ** argv) {
     if (argc != 2) {
@@ -479,12 +684,22 @@ int main(int argc, char ** argv) {
         float theta = acosf(Vector::cos0(a, b)) * (turn > 0 ? 1 : -1) / 3.141592 * 180;
         if (isnan(theta))  // too small
             theta = 0;
+#if 1
+        // Distance per meter
+        float dist = a.mNorm;
+        if (dist < 6.5)
+            theta = 0;
+        else
+            if (abs(theta / dist * 10) < 3)
+                theta = 0;
+#endif
         angles[i] = theta;
 
 #define DEBUG_LOAD 0
         if (DEBUG_LOAD) {
 //            printf("lat:"); data[i].latitude.toString(); printf("\t");
 //            printf("lon:"); data[i].longitude.toString(); printf("\t");
+            printf("%04d: ", i);
             a.toString();
             printf(",%f,%c\n",
                 theta,
@@ -492,12 +707,18 @@ int main(int argc, char ** argv) {
                     theta > 3 ? '\\' : theta < -3 ? '/' : '|');
         }
     }
-    Wavelet w(lines - 2);
-    w.setShift(0, 0);
-    w.setShift(1, 1);
-    w.setShift(2, 0);
-    w.setShift(3, 1);
-    w.setData(angles, 0, 6);
+//    Wavelet w(lines - 2);
+//    w.setShift(0, 0);
+//    w.setShift(1, 1);
+//    w.setShift(2, 0);
+//    w.setShift(3, 1);
+//    w.setData(angles, 0, 6);
+
+    Gaussian g(angles, lines - 2);
+    g.filter(16);
+
+    FindCurve f(g.mResult, g.mSize);
+    f.findCurve();
 
     printf("Total %fm\n", accl);
     printf ("%.f seconds for processing %d data.\n", seconds, lines);
