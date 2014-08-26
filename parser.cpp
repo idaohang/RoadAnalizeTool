@@ -550,7 +550,7 @@ public:
         }
 
         bool setData(const double * data, size_t size) {
-            if (size < 4)
+            if (size < 4)  // according to gaussian filter size
                 return false;
             mSize = size;
             mData = new double [mSize];
@@ -578,6 +578,7 @@ public:
         void writeSerial(unsigned int s) {
             if (mData == NULL)
                 return;
+            //printf("\nCurve %u\n", s);
             char name[30];
             snprintf(name, 30, "/tmp/pbm/curve_%04u.pbm", s);
             Graph<double> g;
@@ -585,13 +586,17 @@ public:
             int vlines[2] = {(int)mPeak, 0};
             g.setVerticalLines(vlines);
             g.write(name, 100, 300);
-            printf("Size %lu, Total %6f Peak at %d\n", mSize, mTotal, mPeak);
+            //printf("Size %lu, Total %6f Peak at %d\n", mSize, mTotal, mPeak);
         }
 
         double operator[](int i) {
             if (mData == NULL)
                 return 0;
             return mData[i];
+        }
+
+        void toString() {
+            printf("Size %lu, Total %6f\n", mSize, mTotal);
         }
     };
 
@@ -638,8 +643,7 @@ public:
                     Curve c;
                     bool ret = c.setData(buffer, index);
                     if (ret) {
-                        printf("\nCurve %d\n", serial);
-                        c.writeSerial(serial);
+                        //c.writeSerial(serial);
                         mCurveLocation[serial] = i - (index - c.mPeak);
                         serial++;
                     }
@@ -666,6 +670,16 @@ public:
         g.setThreshold(mThreshold);
         g.setVerticalLines(mCurveLocation);
         g.write("/tmp/pbm/FindCurve.pbm", mSize, 300);
+        for (int i = 0; i < CURVE_BUF_SIZE; i++) {
+            int loc = mCurveLocation[i];
+            if (loc == 0)
+                return;
+            printf("Curve %d:\tlat:", i);
+            data[loc].latitude.toString();
+            printf("\tlon:");
+            data[loc].longitude.toString();
+            printf("\n");
+        }
     }
 };
 
@@ -761,7 +775,7 @@ int main(int argc, char ** argv) {
 //    w.setData(angles, 0, 6);
 
     Gaussian g(angles, lines - 2);
-    g.filter(8);
+    g.filter(4);
 
     FindCurve f(g.mResult, g.mSize);
     f.findCurve();
